@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import (
     ChatCompletionRequest,
@@ -8,27 +8,24 @@ from app.api.schemas import (
     ModelListResponse,
 )
 
-from app.providers.mock import MockProvider
-
-from app.services.router import (
-    ModelRouter,
-    ModelNotFoundError,
+from app.providers.base import (
+    ProviderTimeoutError,
+    ProviderConnectionError,
+    ProviderHTTPError,
+    ProviderResponseError,
 )
 
+from app.services.router import ModelNotFoundError
 
-# 创建 API 路由对象
+
 router = APIRouter()
-
-# 创建模型路由器
-model_router = ModelRouter()
-
-# 注册 Mock 模型
-model_router.register("mock-chat", MockProvider())
 
 
 # 1. 查询模型列表
 @router.get("/models", response_model=ModelListResponse)
-async def list_models():
+async def list_models(request: Request):
+
+    model_router = request.app.state.model_router
 
     models = [
         ModelInfo(id=model_name)
@@ -41,24 +38,63 @@ async def list_models():
 # 2. 聊天补全接口
 @router.post(
     "/chat/completions",
-    response_model=ChatCompletionResponse
+    response_model=ChatCompletionResponse,
 )
 async def chat_completions(
-    request: ChatCompletionRequest
+    request: Request,
+    completion_request: ChatCompletionRequest,
 ):
 
+    model_router = request.app.state.model_router
+
     try:
-        response = await model_router.chat_completion(request)
+
+        response = await model_router.chat_completion(
+            completion_request
+        )
+
         return response
 
-    except ModelNotFoundError as e:
+    except ModelNotFoundError as exc:
+
         raise HTTPException(
             status_code=404,
-            detail=str(e)
-        )
+            detail=str(exc),
+        ) from exc
 
-    except NotImplementedError as e:
+    except NotImplementedError as exc:
+
         raise HTTPException(
             status_code=400,
-            detail=str(e)
-        )
+            detail=str(exc),
+        ) from exc
+
+    except ProviderTimeoutError as exc:
+
+        raise HTTPException(
+            status_code=504,
+            detail=str(exc),
+        ) from exc
+
+    except ProviderConnectionError as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from exc
+
+    except ProviderHTTPError as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Upstream returned HTTP {exc.status_code}"
+            ),
+        ) from exc
+
+    except ProviderResponseError as exc:
+
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from exc

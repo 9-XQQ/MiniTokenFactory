@@ -38,4 +38,8 @@ dist/
 results/*
 !results/.gitkeep
 
-!results/.gitkeep
+# experiments
+experiments/
+
+# tests
+tests/
