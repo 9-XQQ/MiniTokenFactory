@@ -1,3 +1,6 @@
+from app.services.rate_limiter import TokenBucket
+
+import asyncio
 
 from contextlib import asynccontextmanager
 
@@ -21,7 +24,15 @@ def create_app(
     upstream_transport: httpx.AsyncBaseTransport | None = None,
     upstream_base_url: str = "http://127.0.0.1:8001/v1",
     upstream_api_key: str | None = None,
+    max_concurrent_requests: int = 2,
+    rate_limit_per_second: float = 20.0,
+    rate_limit_capacity: int = 100,
 ) -> FastAPI:
+
+    if max_concurrent_requests < 1:
+        raise ValueError(
+            "max_concurrent_requests must be >= 1"
+        )
     """
     创建 MiniTokenFactory 应用。
 
@@ -91,6 +102,14 @@ def create_app(
             # 8. 将应用资源保存到 app.state
             app.state.http_client = http_client
             app.state.model_router = model_router
+            app.state.inference_semaphore = asyncio.Semaphore(
+                max_concurrent_requests
+            )
+
+            app.state.rate_limiter = TokenBucket(
+            rate=rate_limit_per_second,
+            capacity=rate_limit_capacity,
+            )
 
             # 9. 应用开始处理请求
             yield

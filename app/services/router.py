@@ -4,7 +4,7 @@ from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-
+from collections.abc import AsyncIterator
 
 class ModelNotFoundError(Exception):
     """请求的模型不存在。"""
@@ -48,3 +48,27 @@ class ModelRouter:
             )
 
         return await provider.chat_completion(request)
+
+
+    def chat_completion_stream(
+        self,
+        request: ChatCompletionRequest
+    ) -> AsyncIterator[str]:
+        """
+        根据模型名称选择 Provider，返回流式迭代器。
+
+        输入：
+            ChatCompletionRequest
+
+        输出：
+            AsyncIterator[str]
+        """
+
+        provider = self._providers.get(request.model)
+
+        if provider is None:
+            raise ModelNotFoundError(
+                f"Model '{request.model}' not found"
+            )
+
+        return provider.chat_completion_stream(request)

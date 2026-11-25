@@ -43,3 +43,7 @@ experiments/
 
 # tests
 tests/
+
+
+# debug
+.vscode/

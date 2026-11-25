@@ -1,3 +1,5 @@
+import json
+from collections.abc import AsyncIterator, Mapping
 
 from collections.abc import Mapping
 from typing import Any
@@ -153,3 +155,143 @@ class OpenAICompatibleProvider(BaseProvider):
             ) from exc
 
         return result
+
+
+    def chat_completion_stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[str]:
+        """转发上游 OpenAI Compatible SSE 响应。"""
+
+        # 1. 在创建流之前验证请求
+        if not request.stream:
+            raise ValueError(
+                "Streaming request must set stream=True"
+            )
+
+        upstream_model = self._model_mapping.get(request.model)
+
+        if upstream_model is None:
+            raise ValueError(
+                f"No upstream model mapping for '{request.model}'"
+            )
+
+        # 2. 构造上游请求
+        payload: JsonObject = {
+            "model": upstream_model,
+            "messages": [
+                message.model_dump()
+                for message in request.messages
+            ],
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "stream": True,
+        }
+
+        headers: dict[str, str] = {}
+
+        if self._api_key:
+            headers["Authorization"] = (
+                f"Bearer {self._api_key}"
+            )
+
+        url = f"{self._base_url}/chat/completions"
+
+        # 3. 真正执行异步网络读取
+        async def generate() -> AsyncIterator[str]:
+
+            try:
+                async with self._client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers=headers,
+                ) as response:
+
+                    response.raise_for_status()
+
+                    data_lines: list[str] = []
+
+                    async for line in response.aiter_lines():
+
+                        # 收集当前 SSE 事件中的 data 字段
+                        if line.startswith("data:"):
+                            value = line[5:]
+
+                            if value.startswith(" "):
+                                value = value[1:]
+
+                            data_lines.append(value)
+                            continue
+
+                        # 当前仅处理 OpenAI 兼容的 data 事件
+                        if line != "":
+                            continue
+
+                        # 空行代表一个 SSE 事件结束
+                        if not data_lines:
+                            continue
+
+                        event_data = "\n".join(data_lines)
+                        data_lines.clear()
+
+                        # 4. 检查流结束标记
+                        if event_data == "[DONE]":
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        # 5. 解析上游模型的增量响应
+                        try:
+                            chunk = json.loads(event_data)
+                        except json.JSONDecodeError as exc:
+                            raise ProviderResponseError(
+                                "Upstream returned invalid SSE JSON"
+                            ) from exc
+
+                        if (
+                            not isinstance(chunk, dict)
+                            or chunk.get("object")
+                            != "chat.completion.chunk"
+                            or not isinstance(
+                                chunk.get("choices"), list
+                            )
+                        ):
+                            raise ProviderResponseError(
+                                "Invalid upstream SSE chunk"
+                            )
+
+                        # 对外使用 Gateway 注册的模型别名
+                        chunk["model"] = request.model
+
+                        # 6. 重新编码后转发给客户端
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                chunk,
+                                ensure_ascii=False,
+                            )
+                            + "\n\n"
+                        )
+
+                    # 上游提前结束，且没有发送 [DONE]
+                    raise ProviderResponseError(
+                        "Upstream SSE ended without [DONE]"
+                    )
+
+            except httpx.TimeoutException as exc:
+                raise ProviderTimeoutError(
+                    "Upstream streaming request timed out"
+                ) from exc
+
+            except httpx.HTTPStatusError as exc:
+                raise ProviderHTTPError(
+                    exc.response.status_code
+                ) from exc
+
+            except httpx.RequestError as exc:
+                raise ProviderConnectionError(
+                    "Upstream streaming connection failed"
+                ) from exc
+
+        return generate()
+
